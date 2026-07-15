@@ -1,0 +1,34 @@
+@import 'tailwindcss';
+@config '../tailwind.config.ts';
+
+/*
+  Tailwind v4 theme tokens live here (preferred over JS theme.extend).
+  Example:
+  @theme {
+    --color-brand: #0d99ff;
+    --font-sans: Inter, system-ui, sans-serif;
+  }
+*/
+
+:root {
+  color-scheme: light dark;
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
