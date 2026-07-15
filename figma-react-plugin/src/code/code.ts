@@ -1,4 +1,11 @@
-import type { PluginToUIMessage, UIToPluginMessage } from '../shared/messages'
+/// <reference types="@figma/plugin-typings" />
+
+import type {
+  HexColor,
+  PluginToUIMessage,
+  SelectionSnapshot,
+  UIToPluginMessage,
+} from '../shared/messages'
 import { PLUGIN_UI } from '../shared/uiSizes'
 
 /** Node ids created by this plugin in the current run (until closed). */
@@ -7,6 +14,121 @@ const createdNodeIds = new Set<string>()
 let nextRowIndex = 0
 
 const CELL = 150
+const LABEL_LAYER_NAME = 'Label'
+const DEFAULT_FONT: FontName = { family: 'Inter', style: 'Regular' }
+
+function isLayoutHost(node: SceneNode): node is SceneNode & LayoutMixin {
+  return 'x' in node && 'width' in node && 'height' in node
+}
+
+function labelContainerFor(
+  host: SceneNode & LayoutMixin,
+): SceneNode & LayoutMixin & ChildrenMixin {
+  if (
+    host.type === 'FRAME' ||
+    host.type === 'GROUP' ||
+    host.type === 'COMPONENT'
+  ) {
+    return host as SceneNode & LayoutMixin & ChildrenMixin
+  }
+  const parent = host.parent
+  if (
+    parent &&
+    (parent.type === 'FRAME' || parent.type === 'GROUP') &&
+    'appendChild' in parent
+  ) {
+    return parent as SceneNode & LayoutMixin & ChildrenMixin
+  }
+  throw new Error('Label needs a frame container')
+}
+
+function findLabelForHost(host: SceneNode): TextNode | null {
+  if (host.type === 'TEXT' && host.name === LABEL_LAYER_NAME) return host
+
+  if ('children' in host) {
+    const nested = host.children.find(
+      (node) => node.type === 'TEXT' && node.name === LABEL_LAYER_NAME,
+    )
+    if (nested?.type === 'TEXT') return nested
+  }
+
+  const parent = host.parent
+  if (parent && 'children' in parent) {
+    const sibling = parent.children.find(
+      (node) => node.type === 'TEXT' && node.name === LABEL_LAYER_NAME,
+    )
+    if (sibling?.type === 'TEXT') return sibling
+  }
+
+  return null
+}
+
+function centerTextInContainer(
+  text: TextNode,
+  container: SceneNode & LayoutMixin,
+) {
+  text.x = Math.max(0, (container.width - text.width) / 2)
+  text.y = Math.max(0, (container.height - text.height) / 2)
+}
+
+async function loadFontForText(text?: TextNode): Promise<FontName> {
+  if (text && text.fontName !== figma.mixed) {
+    await figma.loadFontAsync(text.fontName)
+    return text.fontName
+  }
+  await figma.loadFontAsync(DEFAULT_FONT)
+  return DEFAULT_FONT
+}
+
+async function writeTextContent(
+  text: TextNode,
+  characters: string,
+  fontSize: number,
+) {
+  const font = await loadFontForText(text)
+  text.fontName = font
+  text.fontSize = Math.max(1, Math.min(400, fontSize))
+  text.characters = characters
+  text.textAutoResize = 'WIDTH_AND_HEIGHT'
+  text.fills = [{ type: 'SOLID', color: { r: 0, g: 0, b: 0 } }]
+}
+
+/** Create or update a centered Text label inside the host frame. */
+async function upsertCenteredLabel(
+  host: SceneNode & LayoutMixin,
+  characters: string,
+  fontSize: number,
+): Promise<TextNode | null> {
+  const content = characters.trim()
+  if (!content) return null
+
+  const container = labelContainerFor(host)
+  let text = findLabelForHost(host)
+
+  if (!text) {
+    text = figma.createText()
+    text.name = LABEL_LAYER_NAME
+    container.appendChild(text)
+  } else {
+    // Keep label on top of the Fill rectangle
+    container.appendChild(text)
+  }
+
+  await writeTextContent(text, content, fontSize)
+  centerTextInContainer(text, container)
+  return text
+}
+
+async function updateTextNode(
+  text: TextNode,
+  characters: string,
+  fontSize: number,
+): Promise<boolean> {
+  const content = characters.trim()
+  if (!content) return false
+  await writeTextContent(text, content, fontSize)
+  return true
+}
 
 figma.showUI(__html__, {
   width: PLUGIN_UI.width,
@@ -27,14 +149,90 @@ async function pruneMissingCreatedNodes() {
   }
 }
 
+function rgbToHex(color: RGB): HexColor {
+  const toHex = (channel: number) =>
+    Math.round(channel * 255)
+      .toString(16)
+      .padStart(2, '0')
+  return `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`
+}
+
+function solidFillHex(node: SceneNode): HexColor | null {
+  if (!('fills' in node) || node.fills === figma.mixed) return null
+  const fills = node.fills
+  if (!Array.isArray(fills)) return null
+  const solid = fills.find(
+    (paint) => paint.type === 'SOLID' && paint.visible !== false,
+  )
+  if (!solid || solid.type !== 'SOLID') return null
+  return rgbToHex(solid.color)
+}
+
+function buildSelectionSnapshot(
+  selection: readonly SceneNode[],
+  trackedCount: number,
+): SelectionSnapshot {
+  const first = selection[0]
+  if (!first) {
+    return {
+      selectionCount: 0,
+      selectionNames: [],
+      trackedCount,
+      width: null,
+      height: null,
+      fill: null,
+      characters: null,
+      fontSize: null,
+      isText: false,
+    }
+  }
+
+  const width = 'width' in first ? first.width : null
+  const height = 'height' in first ? first.height : null
+  let fill = solidFillHex(first)
+  if (!fill && 'children' in first) {
+    const fillChild = first.children.find(
+      (node) => node.name === 'Fill' || node.type === 'RECTANGLE',
+    )
+    if (fillChild) fill = solidFillHex(fillChild)
+  }
+
+  let characters: string | null = null
+  let fontSize: number | null = null
+  const isText = first.type === 'TEXT'
+
+  if (isText) {
+    characters = first.characters
+    fontSize =
+      first.fontSize === figma.mixed ? null : (first.fontSize as number)
+  } else if (isLayoutHost(first)) {
+    const label = findLabelForHost(first)
+    if (label) {
+      characters = label.characters
+      fontSize =
+        label.fontSize === figma.mixed ? null : (label.fontSize as number)
+    }
+  }
+
+  return {
+    selectionCount: selection.length,
+    selectionNames: selection.map((node) => node.name),
+    trackedCount,
+    width,
+    height,
+    fill,
+    characters,
+    fontSize,
+    isText,
+  }
+}
+
 async function notifySelection() {
   await pruneMissingCreatedNodes()
   const selection = figma.currentPage.selection
   postToUI({
     type: 'selection-change',
-    selectionCount: selection.length,
-    selectionNames: selection.map((node) => node.name),
-    trackedCount: createdNodeIds.size,
+    ...buildSelectionSnapshot(selection, createdNodeIds.size),
   })
 }
 
@@ -53,6 +251,44 @@ function hexToRgb(hex: string): RGB {
   }
 }
 
+function canSetFills(node: SceneNode): node is GeometryMixin & SceneNode {
+  return 'fills' in node && node.fills !== figma.mixed
+}
+
+function canResize(node: SceneNode): node is LayoutMixin & SceneNode {
+  return 'resize' in node && typeof node.resize === 'function'
+}
+
+async function applyTextToSelection(characters: string, fontSize: number) {
+  const selection = [...figma.currentPage.selection]
+  const touched: SceneNode[] = []
+  let updated = 0
+
+  for (const node of selection) {
+    if (node.type === 'TEXT') {
+      if (await updateTextNode(node, characters, fontSize)) {
+        touched.push(node)
+        updated += 1
+      }
+      continue
+    }
+
+    if (!isLayoutHost(node)) continue
+
+    const label = await upsertCenteredLabel(node, characters, fontSize)
+    if (label) {
+      touched.push(label)
+      updated += 1
+    }
+  }
+
+  if (touched.length > 0) {
+    figma.viewport.scrollAndZoomIntoView(touched)
+  }
+
+  return updated
+}
+
 figma.ui.onmessage = async (msg: UIToPluginMessage) => {
   switch (msg.type) {
     case 'create-rectangles': {
@@ -61,27 +297,191 @@ figma.ui.onmessage = async (msg: UIToPluginMessage) => {
       const row = nextRowIndex
       nextRowIndex += 1
       const nameOffset = createdNodeIds.size
+      const labelText = msg.labelText.trim()
+      const labelFontSize = Math.max(1, Math.min(400, msg.labelFontSize))
+      let labelError: string | null = null
+      let labelsCreated = 0
 
       for (let i = 0; i < msg.count; i++) {
+        const frame = figma.createFrame()
+        frame.name = `Rect ${nameOffset + i + 1}`
+        frame.resize(100, 100)
+        frame.x = i * CELL
+        frame.y = row * CELL
+        frame.fills = []
+        frame.clipsContent = false
+        frame.layoutMode = 'NONE'
+
         const rect = figma.createRectangle()
-        rect.x = i * CELL
-        rect.y = row * CELL
+        rect.name = 'Fill'
         rect.resize(100, 100)
+        rect.x = 0
+        rect.y = 0
         rect.fills = [{ type: 'SOLID', color }]
-        rect.name = `Rect ${nameOffset + i + 1}`
-        figma.currentPage.appendChild(rect)
-        createdNodeIds.add(rect.id)
-        nodes.push(rect)
+        frame.appendChild(rect)
+
+        figma.currentPage.appendChild(frame)
+        createdNodeIds.add(frame.id)
+        nodes.push(frame)
+
+        if (labelText) {
+          try {
+            const label = await upsertCenteredLabel(
+              frame,
+              labelText,
+              labelFontSize,
+            )
+            if (label) {
+              labelsCreated += 1
+              nodes.push(label)
+            }
+          } catch (error) {
+            labelError =
+              error instanceof Error
+                ? error.message
+                : 'Failed to create label text'
+          }
+        }
       }
 
-      // Zoom to new nodes without changing selection (avoids selectionchange).
       figma.viewport.scrollAndZoomIntoView(nodes)
       postToUI({
         type: 'created',
         count: msg.count,
         trackedCount: createdNodeIds.size,
       })
-      figma.notify(`Created ${msg.count} rectangle(s)`)
+
+      if (labelText && labelsCreated === 0) {
+        const message =
+          labelError ?? 'Rectangles created, but labels failed'
+        postToUI({
+          type: 'action-done',
+          message,
+          trackedCount: createdNodeIds.size,
+        })
+        figma.notify(message, { error: true })
+      } else if (labelText) {
+        figma.notify(
+          `Created ${msg.count} rectangle(s) with ${labelsCreated} label(s)`,
+        )
+      } else {
+        figma.notify(`Created ${msg.count} rectangle(s)`)
+      }
+      break
+    }
+
+    case 'apply-fill': {
+      const selection = figma.currentPage.selection
+      if (selection.length === 0) {
+        figma.notify('Select at least one layer')
+        break
+      }
+
+      const color = hexToRgb(msg.color)
+      let updated = 0
+      for (const node of selection) {
+        if ('children' in node) {
+          const fillChild = node.children.find(
+            (child) => child.name === 'Fill' && canSetFills(child),
+          )
+          if (fillChild && canSetFills(fillChild)) {
+            fillChild.fills = [{ type: 'SOLID', color }]
+            updated += 1
+            continue
+          }
+        }
+        if (!canSetFills(node)) continue
+        node.fills = [{ type: 'SOLID', color }]
+        updated += 1
+      }
+
+      const message =
+        updated > 0
+          ? `Updated fill on ${updated} layer(s)`
+          : 'No selected layers support fills'
+      postToUI({
+        type: 'action-done',
+        message,
+        trackedCount: createdNodeIds.size,
+      })
+      figma.notify(message)
+      break
+    }
+
+    case 'apply-size': {
+      const selection = figma.currentPage.selection
+      if (selection.length === 0) {
+        figma.notify('Select at least one layer')
+        break
+      }
+
+      const width = Math.max(1, msg.width)
+      const height = Math.max(1, msg.height)
+      let updated = 0
+      for (const node of selection) {
+        if (!canResize(node)) continue
+        node.resize(width, height)
+        if ('children' in node) {
+          const fillChild = node.children.find((child) => child.name === 'Fill')
+          if (fillChild && canResize(fillChild)) {
+            fillChild.resize(width, height)
+            fillChild.x = 0
+            fillChild.y = 0
+          }
+          const label = findLabelForHost(node)
+          if (label) {
+            centerTextInContainer(label, node)
+          }
+        }
+        updated += 1
+      }
+
+      const message =
+        updated > 0
+          ? `Resized ${updated} layer(s) to ${width}×${height}`
+          : 'No selected layers can be resized'
+      postToUI({
+        type: 'action-done',
+        message,
+        trackedCount: createdNodeIds.size,
+      })
+      await notifySelection()
+      figma.notify(message)
+      break
+    }
+
+    case 'apply-text': {
+      const selection = figma.currentPage.selection
+      if (selection.length === 0) {
+        figma.notify('Select at least one layer')
+        break
+      }
+
+      try {
+        const characters = msg.characters.trim() || 'Text'
+        const fontSize = Math.max(1, Math.min(400, msg.fontSize))
+        const updated = await applyTextToSelection(characters, fontSize)
+
+        const message =
+          updated > 0
+            ? `Applied text to ${updated} layer(s)`
+            : 'Could not apply text to selection'
+        postToUI({
+          type: 'action-done',
+          message,
+          trackedCount: createdNodeIds.size,
+        })
+        figma.notify(message)
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to apply text'
+        postToUI({
+          type: 'action-done',
+          message,
+          trackedCount: createdNodeIds.size,
+        })
+        figma.notify(message)
+      }
       break
     }
 

@@ -1,140 +1,91 @@
 import { useEffect, useState } from 'react'
-import { HexColorPicker } from 'react-colorful'
 import type { HexColor } from '../shared/messages'
-import { PLUGIN_UI } from '../shared/uiSizes'
 import { postToPlugin } from '../hooks/useFigmaMessages'
+import { ColorField } from './ColorField'
+import { NumberField } from './NumberField'
+import { TextFields } from './TextFields'
 
 type Props = {
   count: number
   color: HexColor
+  labelText: string
+  labelFontSize: number
   selectionCount: number
   selectionNames: string[]
   trackedCount: number
   status: string
   onCountChange: (count: number) => void
   onColorChange: (color: HexColor) => void
-}
-
-function normalizeHex(value: string): HexColor | null {
-  const raw = value.trim()
-  const withHash = raw.startsWith('#') ? raw : `#${raw}`
-  if (!/^#[0-9a-fA-F]{6}$/.test(withHash)) return null
-  return withHash.toLowerCase() as HexColor
-}
-
-function ColorField({
-  color,
-  onColorChange,
-}: {
-  color: HexColor
-  onColorChange: (color: HexColor) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const [hexDraft, setHexDraft] = useState<string>(color)
-
-  useEffect(() => {
-    postToPlugin({
-      type: 'resize',
-      width: PLUGIN_UI.width,
-      height: open ? PLUGIN_UI.heightWithPicker : PLUGIN_UI.heightDefault,
-    })
-
-    return () => {
-      postToPlugin({
-        type: 'resize',
-        width: PLUGIN_UI.width,
-        height: PLUGIN_UI.heightDefault,
-      })
-    }
-  }, [open])
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          aria-label="Toggle color picker"
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-          className="h-10 w-10 shrink-0 rounded border border-(--figma-color-border) shadow-inner"
-          style={{ backgroundColor: color }}
-        />
-        <input
-          type="text"
-          value={hexDraft}
-          spellCheck={false}
-          onChange={(event) => {
-            const next = event.target.value
-            setHexDraft(next)
-            const normalized = normalizeHex(next)
-            if (normalized) onColorChange(normalized)
-          }}
-          onBlur={() => {
-            const normalized = normalizeHex(hexDraft)
-            if (normalized) {
-              setHexDraft(normalized)
-              onColorChange(normalized)
-            } else {
-              setHexDraft(color)
-            }
-          }}
-          className="min-w-0 flex-1 rounded border border-(--figma-color-border) bg-(--figma-color-bg) px-3 py-2 font-mono text-sm text-(--figma-color-text) outline-none focus:border-(--figma-color-border-selected)"
-        />
-      </div>
-
-      {open && (
-        <div className="rounded-lg border border-(--figma-color-border) bg-(--figma-color-bg-secondary) p-3">
-          <HexColorPicker
-            color={color}
-            onChange={(next) => {
-              const normalized = next.toLowerCase() as HexColor
-              setHexDraft(normalized)
-              onColorChange(normalized)
-            }}
-            style={{ width: '100%' }}
-          />
-        </div>
-      )}
-    </div>
-  )
+  onLabelTextChange: (value: string) => void
+  onLabelFontSizeChange: (value: number) => void
 }
 
 export function CreateRectanglesForm({
   count,
   color,
+  labelText,
+  labelFontSize,
   selectionCount,
   selectionNames,
   trackedCount,
   status,
   onCountChange,
   onColorChange,
+  onLabelTextChange,
+  onLabelFontSizeChange,
 }: Props) {
+  const [localCount, setLocalCount] = useState(count)
+
+  useEffect(() => {
+    setLocalCount(count)
+  }, [count])
+
   return (
     <form
       className="flex flex-col gap-4"
       onSubmit={(event) => {
         event.preventDefault()
-        postToPlugin({ type: 'create-rectangles', count, color })
+        const next = Math.max(1, Math.min(50, localCount))
+        onCountChange(next)
+        setLocalCount(next)
+        postToPlugin({
+          type: 'create-rectangles',
+          count: next,
+          color,
+          labelText,
+          labelFontSize,
+        })
       }}
     >
       <label className="flex flex-col gap-1 text-sm">
         <span className="font-medium text-(--figma-color-text)">
           Number of rectangles
         </span>
-        <input
-          type="number"
+        <NumberField
+          aria-label="Number of rectangles"
+          value={localCount}
           min={1}
           max={50}
-          value={count}
-          onChange={(event) => onCountChange(Number(event.target.value) || 1)}
+          onChange={(next) => {
+            setLocalCount(next)
+            onCountChange(next)
+          }}
           className="rounded border border-(--figma-color-border) bg-(--figma-color-bg) px-3 py-2 text-(--figma-color-text) outline-none focus:border-(--figma-color-border-selected)"
         />
       </label>
 
       <div className="flex flex-col gap-1 text-sm">
-        <span className="font-medium text-(--figma-color-text)">Color</span>
+        <span className="font-medium text-(--figma-color-text)">Fill color</span>
         <ColorField color={color} onColorChange={onColorChange} />
       </div>
+
+      <TextFields
+        characters={labelText}
+        fontSize={labelFontSize}
+        onCharactersChange={onLabelTextChange}
+        onFontSizeChange={onLabelFontSizeChange}
+        hint="Optional. Centered text label on each new rectangle (Inter)."
+      />
 
       <div className="rounded-lg bg-(--figma-color-bg-secondary) p-3 text-xs text-(--figma-color-text-secondary)">
         <p>
@@ -190,10 +141,6 @@ export function CreateRectanglesForm({
         >
           Delete selection ({selectionCount})
         </button>
-        <p className="text-[11px] leading-snug text-(--figma-color-text-secondary)">
-          Tip: you can also select layers on the canvas and press Delete /
-          Backspace in Figma — no plugin needed.
-        </p>
       </div>
     </form>
   )

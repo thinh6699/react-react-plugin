@@ -2,7 +2,8 @@ import { useEffect } from 'react'
 import type {
   DeleteScope,
   PluginToUIMessage,
-  UIToPluginMessage
+  SelectionSnapshot,
+  UIToPluginMessage,
 } from '../shared/messages'
 
 /** Send a typed message from the UI iframe to the main plugin thread. */
@@ -11,18 +12,15 @@ export function postToPlugin(message: UIToPluginMessage) {
 }
 
 type FigmaMessageHandlers = {
-  onSelectionChange?: (
-    selectionCount: number,
-    selectionNames: string[],
-    trackedCount: number
-  ) => void
+  onSelectionChange?: (payload: SelectionSnapshot) => void
   onCreated?: (count: number, trackedCount: number) => void
   onDeleted?: (count: number, trackedCount: number, scope: DeleteScope) => void
+  onActionDone?: (trackedCount: number) => void
 }
 
 /** Listen for messages from the main plugin thread. */
 export function useFigmaMessages(handlers: FigmaMessageHandlers) {
-  const { onSelectionChange, onCreated, onDeleted } = handlers
+  const { onSelectionChange, onCreated, onDeleted, onActionDone } = handlers
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -30,23 +28,24 @@ export function useFigmaMessages(handlers: FigmaMessageHandlers) {
       if (!message) return
 
       switch (message.type) {
-        case 'selection-change':
-          onSelectionChange?.(
-            message.selectionCount,
-            message.selectionNames,
-            message.trackedCount
-          )
+        case 'selection-change': {
+          const { type: _type, ...snapshot } = message
+          onSelectionChange?.(snapshot)
           break
+        }
         case 'created':
           onCreated?.(message.count, message.trackedCount)
           break
         case 'deleted':
           onDeleted?.(message.count, message.trackedCount, message.scope)
           break
+        case 'action-done':
+          onActionDone?.(message.trackedCount)
+          break
       }
     }
 
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [onSelectionChange, onCreated, onDeleted])
+  }, [onSelectionChange, onCreated, onDeleted, onActionDone])
 }
