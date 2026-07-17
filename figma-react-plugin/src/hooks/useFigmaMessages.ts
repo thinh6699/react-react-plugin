@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import type {
   DeleteScope,
   PluginToUIMessage,
+  SelectionExportNode,
   SelectionSnapshot,
   UIToPluginMessage,
 } from '../shared/messages'
@@ -15,13 +16,28 @@ type FigmaMessageHandlers = {
   onSelectionChange?: (payload: SelectionSnapshot) => void
   onCreated?: (count: number, trackedCount: number) => void
   onDeleted?: (count: number, trackedCount: number, scope: DeleteScope) => void
-  onActionDone?: (trackedCount: number) => void
+  onActionDone?: (message: string, trackedCount: number) => void
+  onSelectionExportPayload?: (payload: {
+    fileName: string
+    pageName: string
+    nodes: SelectionExportNode[]
+  }) => void
+  onStorageValue?: (key: string, value: string | undefined) => void
+  onPluginDataValue?: (key: string, value: string) => void
+  onExportPng?: (bytesBase64: string, nodeName: string) => void
 }
 
 /** Listen for messages from the main plugin thread. */
-export function useFigmaMessages(handlers: FigmaMessageHandlers) {
-  const { onSelectionChange, onCreated, onDeleted, onActionDone } = handlers
-
+export function useFigmaMessages({
+  onSelectionChange,
+  onCreated,
+  onDeleted,
+  onActionDone,
+  onSelectionExportPayload,
+  onStorageValue,
+  onPluginDataValue,
+  onExportPng,
+}: FigmaMessageHandlers) {
   useEffect(() => {
     function onMessage(event: MessageEvent) {
       const message = event.data?.pluginMessage as PluginToUIMessage | undefined
@@ -40,12 +56,37 @@ export function useFigmaMessages(handlers: FigmaMessageHandlers) {
           onDeleted?.(message.count, message.trackedCount, message.scope)
           break
         case 'action-done':
-          onActionDone?.(message.trackedCount)
+          onActionDone?.(message.message, message.trackedCount)
+          break
+        case 'selection-export-payload':
+          onSelectionExportPayload?.({
+            fileName: message.fileName,
+            pageName: message.pageName,
+            nodes: message.nodes,
+          })
+          break
+        case 'storage-value':
+          onStorageValue?.(message.key, message.value)
+          break
+        case 'plugin-data-value':
+          onPluginDataValue?.(message.key, message.value)
+          break
+        case 'export-png-result':
+          onExportPng?.(message.bytesBase64, message.nodeName)
           break
       }
     }
 
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [onSelectionChange, onCreated, onDeleted, onActionDone])
+  }, [
+    onSelectionChange,
+    onCreated,
+    onDeleted,
+    onActionDone,
+    onSelectionExportPayload,
+    onStorageValue,
+    onPluginDataValue,
+    onExportPng,
+  ])
 }
